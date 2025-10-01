@@ -1,0 +1,115 @@
+//@version=5
+indicator("RVol Panel", shorttitle="RVol Panel", overlay=false, max_bars_back=5000)
+
+//--------USER SETTINGS------------
+daysRVol     = input.int(3,  "Days in RV Baseline")         // Number of prior sessions to build the same-bar baselines
+volMALen     = input.int(3,  "Volume-MA Length")           
+th0          = input.float(0.50, "Thresh 0 (black → red)")   // RVOL thresholds for coloring columns
+th1          = input.float(1.25, "Thresh 1 (red → orange)")
+th2          = input.float(2.00, "Thresh 2 (orange → green)")
+th3          = input.float(2.25, "Thresh 3 (green → light-blue)")
+th4          = input.float(3.00, "Thresh 4 (light-blue → purple)")
+useGradient  = input.bool(false, "Gradient bar colours?")    // If true, use smooth gradients between thresholds (optional feature)
+
+//--------COLOURS ----------------------
+chipMA       = color.rgb(123, 163, 255)   // baseline line (same-bar average)
+chipHist     = color.rgb(255, 191, 126)  
+chipVol      = color.rgb(255, 231, 146)  
+chipCur      = color.rgb(120, 183, 242)  
+chipRVol     = color.rgb(255, 255, 255)  
+txtCol       = color.rgb( 30,  30,  30)
+borderCol    = color.rgb( 0,   0,   0)
+
+colBlack     = color.rgb(0, 0, 0)         // super-low volume (< th0)
+colRed       = color.rgb(160,  0,  0)
+colOrange    = color.rgb(230,130,  0)
+colGreen     = color.rgb(  0,160,  0)
+colLightBlue = color.rgb( 74,155,232)     // > th3
+colPurple    = color.rgb(145, 56,235)     // > th4
+
+//HELPERS
+fmt(v)  => str.tostring(v, format.volume) // Pretty volume formatting (if you add labels later)
+pad(s)  => " " + s + " "                  // Thin padding helper
+
+//SESSION STATE (arrays avoid bar-history limits)
+// These arrays store, bar-by-bar, the session cumulative volume and raw bar volume.
+// dayStart marks the bar_index where each session started.
+var float   cumVol   = 0.0
+var int[]   dayStart = array.new_int()
+var float[] cumBuf   = array.new_float()
+var float[] volBuf   = array.new_float()
+
+// Detect session start (new day for daily charts, new intraday session otherwise)
+isNewDay() =>
+    t = time("D")
+    (na(t[1]) and not na(t)) or t[1] < t
+
+// On new session: reset cumulative; record the start index; keep only the last (daysRVol + 1) starts.
+if isNewDay()
+    cumVol := 0
+    array.push(dayStart, bar_index)
+    if array.size(dayStart) > daysRVol + 1
+        array.shift(dayStart)
+
+// Update running buffers every bar
+cumVol += volume
+array.push(cumBuf, cumVol)
+array.push(volBuf, volume)
+
+//RV CALC (bar-RV & cumulative-RV)
+// For current bar_index, we look back 'daysRVol' sessions and average the same-bar values.
+// If a past session had fewer bars, we clamp to its last index (prevents out-of-range).
+calcRV() =>
+    float barAvg = 0.0
+    float cumAvg = 0.0
+    int   n      = array.size(dayStart)
+    if n >= daysRVol + 1
+        
+        int barsIntoSess = bar_index - array.get(dayStart, n - 1)
+
+        // Loop over the prior 'daysRVol' sessions
+        for i = 1 to daysRVol
+            // d0 = start index of the i-th previous session
+            int d0  = array.get(dayStart, n - i - 1)
+            // d1 = last index of that past session
+            int d1  = (i == 1) ? bar_index : array.get(dayStart, n - i) - 1
+            // Target index = same bar offset; clamp if past session was shorter
+            int idx = math.min(d0 + barsIntoSess, d1)
+            // Accumulate averages (divide here to avoid a second pass)
+            barAvg += array.get(volBuf, idx) / daysRVol
+            cumAvg += array.get(cumBuf, idx) / daysRVol
+    
+    [barAvg > 0 ? volume / barAvg : 0,
+     cumAvg > 0 ? cumVol  / cumAvg : 0,
+     barAvg, cumAvg]
+
+
+[barRV, cumRV, histBarAvg, histCumAvg] = calcRV()
+
+// BAR COLOUR
+
+getBarCol(rv) =>
+    /// Simple stepped version ────────────────────────────────
+    if not useGradient
+        rv < th0 ? colBlack : rv < th1 ? colRed   :rv < th2 ? colOrange:rv < th3 ? colGreen :rv < th4 ? colLightBlue : colPurple
+    // ── Smooth gradient version ─────────────────────────────────────
+    else
+        rv < th0 ? colBlack : rv < th1 ? color.from_gradient(rv, th0, th1, colBlack,  colRed)    :rv < th2 ? color.from_gradient(rv, th1, th2, colRed,    colOrange) :color.from_gradient(rv, th2, th2*2, colOrange, colGreen)
+
+//-------PLOTS-----
+
+avgVolBaseline = histBarAvg > 0 ? histBarAvg : na
+plot(avgVolBaseline, color=chipMA, linewidth=2, title="Avg Volume (same-bar baseline)")
+
+// Volume columns colored by barRV. This is the main visual signal.
+plot(volume,
+     style     = plot.style_columns,
+     color     = getBarCol(barRV),
+     linewidth = 3,
+     title     = "Bar Volume")
+
+
+hline(0, color=color.new(color.gray, 90))
+
+var table panel = table.new(position.top_right, 2, 1, border_width=1, border_color=borderCol)
+
